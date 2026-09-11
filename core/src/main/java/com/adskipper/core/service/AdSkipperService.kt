@@ -17,6 +17,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import com.adskipper.core.data.AppProfileRepository
 import com.adskipper.core.data.AppSettings
 import com.adskipper.core.data.SettingsRepository
@@ -25,6 +26,7 @@ import com.adskipper.core.detect.AdEvidenceTracker
 import com.adskipper.core.detect.AdSdkSignatures
 import com.adskipper.core.detect.DetectionPipeline
 import com.adskipper.core.detect.NodeMatcher
+import com.adskipper.core.detect.SkipLayer
 import com.adskipper.core.detect.SkipTarget
 import com.adskipper.core.detect.SystemSurfaceGuard
 import com.adskipper.core.detect.YoloSkipDetector
@@ -67,6 +69,31 @@ class AdSkipperService : AccessibilityService() {
 
     /** Per-package cooldown to avoid click loops. */
     private val lastAttemptAt = ConcurrentHashMap<String, Long>()
+
+    /** Last event-driven L1 attempt per package; see [fastL1Attempt]. */
+    private val lastFastL1At = ConcurrentHashMap<String, Long>()
+
+    /** Throttles the "why is nothing happening for this package" log line. */
+    private val lastSkipLogAt = ConcurrentHashMap<String, Long>()
+
+    /** Throttles the per-package window-event diagnostic (see onAccessibilityEvent). */
+    private val lastEventLogAt = ConcurrentHashMap<String, Long>()
+
+    private fun logWindowEventOnce(pkg: String, className: String?) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = lastEventLogAt[pkg] ?: 0L
+        if (now - last < 300_000L) return
+        lastEventLogAt[pkg] = now
+        Timber.i("window event in %s: %s", pkg, className ?: "<null>")
+    }
+
+    private fun logSkipOnce(pkg: String, reason: String) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = lastSkipLogAt[pkg] ?: 0L
+        if (now - last < 60_000L) return
+        lastSkipLogAt[pkg] = now
+        Timber.i("not detecting in %s: %s", pkg, reason)
+    }
 
     /** Foreground-session tracking for the L3 splash-window gate. */
     private val lastEventAt = ConcurrentHashMap<String, Long>()
@@ -291,7 +318,10 @@ class AdSkipperService : AccessibilityService() {
                 .createNotificationChannel(channel)
             val notification = android.app.Notification.Builder(this, KEEPALIVE_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("广告跳过运行中")
+                // Taken from the live app label so a rename is reflected here
+                // automatically (the core module cannot reference the app
+                // module's R.string.app_name).
+                .setContentTitle(applicationInfo.loadLabel(packageManager).toString() + "运行中")
                 .setOngoing(true)
                 .build()
             startForeground(
@@ -316,13 +346,20 @@ class AdSkipperService : AccessibilityService() {
         emptySet()
     }
 
-    /** Apps that handle a plain http URL with no host filter are browsers;
-     *  deep-link handlers for specific hosts don't match a bare host like
-     *  this one. The static BROWSER_PACKAGES list backstops OEM browsers
-     *  that hide from the query (e.g. behind role-based resolution). */
+    /** Packages that are actually browsers, i.e. declare the system's browser
+     *  role: [Intent.CATEGORY_APP_BROWSER].
+     *
+     *  The previous query asked for anything that handles a bare http URL, which
+     *  in practice matched nearly every Chinese app — on device the resulting set
+     *  was [com.vivo.browser, cn.wps.moffice_eng, com.android.chrome,
+     *  com.sina.weibo, com.xunlei.downloadprovider, …], and since a match means
+     *  "never detect in this app", whole apps (WPS, Weibo, Xunlei, Youdao
+     *  Dictionary) were silently excluded. CATEGORY_APP_BROWSER is declared only
+     *  by real browsers, so the URL-in-a-webview protection stays while ordinary
+     *  apps are no longer swallowed. The static BROWSER_PACKAGES list still
+     *  backstops OEM browsers that hide from the query. */
     private fun resolveBrowserPackages(): Set<String> = try {
-        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("http://example.invalid/"))
-            .addCategory(Intent.CATEGORY_BROWSABLE)
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_BROWSER)
         packageManager.queryIntentActivities(
             intent,
             PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
@@ -351,6 +388,16 @@ class AdSkipperService : AccessibilityService() {
         ) return
 
         val pkg = event.packageName?.toString() ?: return
+
+        // Launch-time diagnostic, throttled to once per package per 5 minutes:
+        // records which window-state changes actually reach the service, with the
+        // activity class. Without it "app X is never skipped" cannot be told
+        // apart from "no event ever arrived for X" — which is exactly the
+        // ambiguity that made the Youdao report undiagnosable.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            logWindowEventOnce(pkg, event.className?.toString())
+        }
+
         val s = settings.value
         if (!s.masterEnabled) return
         if (!s.layer1Enabled && !s.layer2Enabled && !s.layer3Enabled) return
@@ -364,12 +411,22 @@ class AdSkipperService : AccessibilityService() {
             }
             if (!s.selfTest || !selfTestAdVisible) return
         }
-        if (pkg in s.whitelist || pkg in homePackages || pkg in browserPackages) return
+        if (pkg in s.whitelist || pkg in homePackages || pkg in browserPackages) {
+            // These early returns were silent, so "app X is never skipped at all"
+            // was indistinguishable from a detection miss. Log it once per
+            // package per minute; the launch-time events are where this matters.
+            logSkipOnce(pkg, when {
+                pkg in s.whitelist -> "whitelisted"
+                pkg in homePackages -> "launcher"
+                else -> "browser"
+            })
+            return
+        }
         // Launcher, share sheet, system dialogs: a splash ad never appears
         // there, and without this the "first event after a gap = splash
         // window" heuristic below starts a poller on top of them.
         if (isSystemSurface(s, pkg)) {
-            Timber.d("system surface %s, skip", pkg)
+            logSkipOnce(pkg, "system surface")
             return
         }
 
@@ -408,6 +465,12 @@ class AdSkipperService : AccessibilityService() {
         // mock ad goes through the same poller so it exercises the real path.
         if (inSplashWindow || (s.selfTest && pkg == packageName)) {
             startSplashPoller(pkg)
+            // The poller is the safety net for ads that emit no events at all.
+            // A content change, though, usually means the ad's countdown or skip
+            // button just appeared, so take one cheap L1-only shot immediately:
+            // otherwise the button waits for the next poll tick, which is the
+            // visible "ad closes about a second later" delay.
+            fastL1Attempt(pkg, s)
             return
         }
 
@@ -420,6 +483,29 @@ class AdSkipperService : AccessibilityService() {
         if (now - last < ATTEMPT_COOLDOWN_MS) return
         if (processing.get()) return
         scope.launch { runDetection(pkg, effective) }
+    }
+
+    /** Event-driven, L1-only detection attempt while a splash window is open.
+     *
+     *  Throttled by [FAST_L1_MIN_GAP_MS] and by the shared [processing] gate, so
+     *  a burst of accessibility events cannot stack detections. L2/L3 are left
+     *  to the poller's full-pipeline ticks. */
+    private fun fastL1Attempt(pkg: String, s: AppSettings) {
+        if (!s.layer1Enabled) return
+        // Background windows keep emitting content changes, so without this the
+        // attempt fired ~8x/second for a package that is no longer on screen and
+        // was rejected by the window guard every time (seen in device logs).
+        // The check is one cheap root read; while the app is actually foreground
+        // it always passes, so responsiveness is unchanged.
+        if (rootInActiveWindow?.packageName?.toString() != pkg) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = lastFastL1At[pkg] ?: 0L
+        if (now - last < FAST_L1_MIN_GAP_MS) return
+        if (processing.get()) return
+        lastFastL1At[pkg] = now
+        scope.launch {
+            runDetection(pkg, s.copy(layer2Enabled = false, layer3Enabled = false), inCoreWindow = true)
+        }
     }
 
     /** Runs the pipeline on a fixed cadence for the duration of [pkg]'s splash
@@ -469,13 +555,32 @@ class AdSkipperService : AccessibilityService() {
                     )
                     if (!selfTesting && elapsed > deadline) break
                     ticks++
-                    val effective =
-                        if (downgraded && !adEvidence.isAdConfirmed(pkg)) {
+                    // OCR costs ~200ms, which fits inside SPLASH_POLL_INTERVAL_MS,
+                    // so L1+L2 run on every tick — on-device logs showed the real
+                    // skip buttons of several apps are invisible to the node tree
+                    // and only OCR finds them, and those were waiting a full
+                    // throttle window. Only the image layers (YOLO/VLM) are
+                    // expensive enough to be worth throttling.
+                    val fastTick = ticks % SPLASH_FULL_PIPELINE_EVERY != 0
+                    val effective = when {
+                        downgraded && !adEvidence.isAdConfirmed(pkg) ->
                             s.copy(layer2Enabled = false, layer3Enabled = false)
-                        } else {
-                            s
-                        }
-                    if (runDetection(pkg, effective, inCoreWindow = elapsed <= SPLASH_WINDOW_MS)) taps++
+                        fastTick && s.layer3Enabled -> s.copy(layer3Enabled = false)
+                        else -> s
+                    }
+                    // A tap already landed and this pass found nothing: the ad
+                    // is gone. Continuing to poll is how the phantom tap
+                    // happened — device logs show the poller re-firing ~1s later
+                    // on text in the app's own UI ("跳过" in the real screen,
+                    // (368,1535) vs the ad button at (1072,238)) because the OCR
+                    // layer has no evidence gate. Stop here instead.
+                    val tapped = runDetection(pkg, effective, inCoreWindow = elapsed <= SPLASH_WINDOW_MS)
+                    if (tapped) {
+                        taps++
+                    } else if (taps > 0) {
+                        Timber.d("splash done in %s: %d tap(s) landed, nothing left", pkg, taps)
+                        break
+                    }
                     delay(SPLASH_POLL_INTERVAL_MS)
                 }
             } finally {
@@ -690,7 +795,33 @@ class AdSkipperService : AccessibilityService() {
                 "skip hit in %s via %s at (%.0f, %.0f), timings=%s",
                 pkg, target.layer, target.x, target.y, result.timings,
             )
-            if (!performClick(target.x, target.y)) return false
+            // The tap is dispatched a whole pipeline pass after the screenshot
+            // and the node tree were captured. If the user leaves the app in
+            // between (home / recents / another app), those coordinates now
+            // point at whatever moved underneath. Observed on device: the
+            // recents card of *this* app, whose label contains the very keyword
+            // being matched ("广告跳过"), so the service tapped itself and
+            // brought its own settings screen to the front. Re-verify the
+            // window at the last possible moment and drop the tap if anything
+            // changed.
+            if (!stillOnTargetWindow(pkg, root)) {
+                Timber.i("window changed before tap in %s, tap dropped", pkg)
+                return false
+            }
+            // Downstream of the splash window, L1/L2 used to tap any keyword hit
+            // unconditionally — and once the over-broad browser exclusion was
+            // fixed, content apps (WPS, Weibo, Xunlei, Youdao) started being
+            // scanned and were randomly tapped on ordinary "跳过" text. The
+            // evidence tracker already gates the image layer; apply the same
+            // gate to the keyword layers outside the core splash window, where
+            // there is no launch context to justify a blind tap. Inside the
+            // window the old immediate behaviour is kept: that is the app's
+            // whole purpose and the ad is known to be on screen.
+            if (!inCoreWindow && !adEvidence.isAdConfirmed(pkg)) {
+                Timber.i("no ad evidence in %s — tap gated (steady state)", pkg)
+                return false
+            }
+            if (!performTargetClick(pkg, target)) return false
             val elapsed = android.os.SystemClock.elapsedRealtime() - t0
             statsRepo.record(pkg, target.layer.name, elapsed)
             if (s.debugOverlay) {
@@ -726,6 +857,66 @@ class AdSkipperService : AccessibilityService() {
         packageManager.getPackageInfo(pkg, 0).longVersionCode
     } catch (t: Throwable) {
         -1L
+    }
+
+    /** True when [pkg] still owns the active window and it is the same window
+     *  the detection pass ran against. Guards the gap between capture and tap:
+     *  a package check alone already rejects home/recents/another app, and the
+     *  windowId check additionally rejects an in-app window swap (dialog, new
+     *  activity) that would have moved the target. */
+    private fun stillOnTargetWindow(pkg: String, detectionRoot: AccessibilityNodeInfo?): Boolean {
+        val now = rootInActiveWindow ?: return false
+        if (now.packageName?.toString() != pkg) return false
+        val before = detectionRoot?.windowId ?: -1
+        val after = now.windowId
+        if (before != -1 && after != -1 && before != after) return false
+        return true
+    }
+
+    /** Clicks the target, preferring a window-bound node click and falling back
+     *  to the coordinate gesture the project has always used.
+     *
+     *  Why the fallback matters: plenty of real skip buttons are not marked
+     *  clickable, so ACTION_CLICK is refused on them while a tap at their centre
+     *  works — see the note in [NodeMatcher.findSkipNode]. Dropping those taps
+     *  (an earlier attempt) silently broke skipping for whole ad networks,
+     *  including the in-app mock-ad test.
+     *
+     *  The one case that must NOT fall through is a target whose node has
+     *  disappeared from the coordinates entirely: for an L1 hit the button *was*
+     *  a node, so its absence means the screen moved on, and a raw coordinate
+     *  tap would land on whatever replaced it (this app's own card in recents,
+     *  on device).
+     */
+    private fun performTargetClick(pkg: String, target: SkipTarget): Boolean {
+        val fresh = rootInActiveWindow
+        val hit = if (fresh?.packageName?.toString() == pkg) {
+            NodeMatcher.hitTest(fresh, target.x, target.y)
+        } else {
+            null
+        }
+
+        val clickable = hit?.clickable
+        if (clickable != null) {
+            val clicked = try {
+                clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            } catch (t: Throwable) {
+                Timber.w(t, "node click threw in %s", pkg)
+                false
+            }
+            if (clicked) {
+                Timber.d("node click in %s via %s", pkg, target.layer)
+                return true
+            }
+            Timber.d("node click refused in %s via %s, using coordinates", pkg, target.layer)
+        }
+
+        if (hit != null && hit.nodeAtPoint == null && target.layer == SkipLayer.L1_NODE) {
+            Timber.i("L1 target gone in %s, tap dropped", pkg)
+            return false
+        }
+
+        return performClick(target.x, target.y)
     }
 
     private fun performClick(x: Float, y: Float): Boolean {
@@ -827,8 +1018,18 @@ class AdSkipperService : AccessibilityService() {
         /** Skipped before the first splash poll: launch transitions briefly
          *  show a snapshot of the app's previous session, and both OCR and the
          *  node tree see that stale frame. */
-        private const val SPLASH_POLL_INITIAL_DELAY_MS = 500L
-        private const val SPLASH_POLL_INTERVAL_MS = 750L
+        private const val SPLASH_POLL_INITIAL_DELAY_MS = 150L
+        /** 400ms: twice the original cadence, but device logs showed 250ms +
+         *  OCR peaked at 1.4-2.4s per pass under CPU contention, which made the
+         *  detected latency worse rather than better. */
+        private const val SPLASH_POLL_INTERVAL_MS = 400L
+        /** Every Nth tick runs the full pipeline; the others are L1-only (node
+         *  matching, <10ms). Keeps OCR/image work at the previous cadence while
+         *  making the cheap layer far more responsive. */
+        private const val SPLASH_FULL_PIPELINE_EVERY = 3
+        /** Floor between event-driven L1-only attempts, so an event burst from a
+         *  busy ad SDK cannot pile detections up. */
+        private const val FAST_L1_MIN_GAP_MS = 120L
 
         /** Taps per splash session are capped so a phantom target (matched but
          *  not dismissible) is never tapped indefinitely. */
