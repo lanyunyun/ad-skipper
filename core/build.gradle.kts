@@ -14,6 +14,11 @@ android {
             cmake {
                 abiFilters += "arm64-v8a"
                 arguments += "-DANDROID_STL=c++_shared"
+                // Vulkan stays ON (the configuration the project is tested in).
+                // Only uncomment this for a host without Vulkan-Headers/glslc;
+                // note the CPU-only ggml/ncnn combination crashed natively on a
+                // vivo/Android 16 device in testing, so it is not a good default.
+                // arguments += "-DGGML_VULKAN=OFF"
             }
         }
 
