@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.adskipper.AdSkipperApp
 import com.adskipper.core.data.AppSettings
+import com.adskipper.core.detect.SystemSurfaceGuard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -119,6 +120,27 @@ fun SettingsScreen() {
                 SettingSwitch("自测模式（对本 App 生效，用于模拟广告测试）", settings.selfTest) {
                     scope.launch { app.settingsRepo.setSelfTest(it) }
                 }
+            }
+        }
+
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("系统界面保护", style = MaterialTheme.typography.titleMedium)
+                SettingSwitch(
+                    "桌面 / 分享面板 / 系统弹窗：不识别、不点击",
+                    settings.protectSystemSurfaces,
+                ) {
+                    scope.launch { app.settingsRepo.setProtectSystemSurfaces(it) }
+                }
+                Text(
+                    "始终排除：" + SystemSurfaceGuard.BUILTIN.joinToString("、"),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "另外自动排除没有桌面图标的界面（各厂商的分享面板、权限弹窗往往不属于" +
+                        "任何 App，白名单管不到它们）。探测不出结果时不会误排除，只会放行。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
 
