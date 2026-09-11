@@ -25,6 +25,12 @@ data class AppSettings(
     val layer3Enabled: Boolean = true,
     val keywords: Set<String> = DEFAULT_KEYWORDS,
     val whitelist: Set<String> = DEFAULT_WHITELIST,
+    // Always-on protection for the launcher / share sheet / system dialogs.
+    // Deliberately kept OUT of [whitelist]: that set is persisted on first
+    // launch, so entries added to DEFAULT_WHITELIST by a later version never
+    // reach an existing install (share sheet = `android` was such a miss).
+    val protectSystemSurfaces: Boolean = true,
+    val systemSurfacePackages: Set<String> = emptySet(),
     val vlmThreads: Int = 4,
     // 896px input quadruples image tokens vs the old 448px; leave headroom.
     val vlmTimeoutMs: Long = 8000L,
@@ -65,6 +71,8 @@ class SettingsRepository(private val context: Context) {
             layer3Enabled = p[KEY_L3] ?: true,
             keywords = p[KEY_KEYWORDS] ?: AppSettings.DEFAULT_KEYWORDS,
             whitelist = p[KEY_WHITELIST] ?: AppSettings.DEFAULT_WHITELIST,
+            protectSystemSurfaces = p[KEY_PROTECT_SYSTEM] ?: true,
+            systemSurfacePackages = p[KEY_SYSTEM_PACKAGES] ?: emptySet(),
             vlmThreads = p[KEY_VLM_THREADS] ?: 4,
             vlmTimeoutMs = p[KEY_VLM_TIMEOUT] ?: 4000L,
             debugOverlay = p[KEY_DEBUG_OVERLAY] ?: false,
@@ -79,6 +87,8 @@ class SettingsRepository(private val context: Context) {
     suspend fun setLayer3Enabled(v: Boolean) = edit { it[KEY_L3] = v }
     suspend fun setKeywords(v: Set<String>) = edit { it[KEY_KEYWORDS] = v }
     suspend fun setWhitelist(v: Set<String>) = edit { it[KEY_WHITELIST] = v }
+    suspend fun setProtectSystemSurfaces(v: Boolean) = edit { it[KEY_PROTECT_SYSTEM] = v }
+    suspend fun setSystemSurfacePackages(v: Set<String>) = edit { it[KEY_SYSTEM_PACKAGES] = v }
     suspend fun setVlmThreads(v: Int) = edit { it[KEY_VLM_THREADS] = v }
     suspend fun setVlmTimeoutMs(v: Long) = edit { it[KEY_VLM_TIMEOUT] = v }
     suspend fun setDebugOverlay(v: Boolean) = edit { it[KEY_DEBUG_OVERLAY] = v }
@@ -121,6 +131,8 @@ class SettingsRepository(private val context: Context) {
         val KEY_L3 = booleanPreferencesKey("layer3_enabled")
         val KEY_KEYWORDS = stringSetPreferencesKey("keywords")
         val KEY_WHITELIST = stringSetPreferencesKey("whitelist")
+        val KEY_PROTECT_SYSTEM = booleanPreferencesKey("protect_system_surfaces")
+        val KEY_SYSTEM_PACKAGES = stringSetPreferencesKey("system_surface_packages")
         val KEY_VLM_THREADS = intPreferencesKey("vlm_threads")
         val KEY_VLM_TIMEOUT = longPreferencesKey("vlm_timeout_ms")
         val KEY_DEBUG_OVERLAY = booleanPreferencesKey("debug_overlay")
