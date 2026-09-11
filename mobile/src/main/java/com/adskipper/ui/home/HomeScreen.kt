@@ -27,8 +27,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.adskipper.AdSkipperApp
+import com.adskipper.R
 import com.adskipper.core.data.AppSettings
 import com.adskipper.ui.TestAdActivity
 import kotlinx.coroutines.delay
@@ -62,7 +64,9 @@ fun HomeScreen() {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("广告跳过", style = MaterialTheme.typography.headlineMedium)
+        // Read from app_name: the in-app title used to be a hardcoded string and
+        // therefore stayed "广告跳过" after the app was renamed to "广告助手".
+        Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
