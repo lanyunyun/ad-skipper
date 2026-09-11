@@ -26,6 +26,7 @@ import com.adskipper.core.detect.AdSdkSignatures
 import com.adskipper.core.detect.DetectionPipeline
 import com.adskipper.core.detect.NodeMatcher
 import com.adskipper.core.detect.SkipTarget
+import com.adskipper.core.detect.SystemSurfaceGuard
 import com.adskipper.core.detect.YoloSkipDetector
 import com.adskipper.core.model.ModelCatalog
 import com.adskipper.core.model.ModelManager
@@ -164,6 +165,47 @@ class AdSkipperService : AccessibilityService() {
      *  the user is reading. Splash-ad skipping is for native apps only. */
     private var browserPackages: Set<String> = emptySet()
 
+    /** Launcher-activity probe answers for [SystemSurfaceGuard]. A plain
+     *  HashMap (not ConcurrentHashMap) because "unknown" — null — is a
+     *  legitimate, cacheable answer and ConcurrentHashMap forbids nulls. */
+    private val launcherActivityCache = HashMap<String, Boolean?>()
+
+    /** Always-on protection for the launcher / share sheet / system dialogs;
+     *  rebuilt whenever the settings change. Kept out of [homePackages] and
+     *  the user whitelist on purpose: a persisted whitelist never receives new
+     *  defaults, which is exactly how the share sheet slipped through. */
+    @Volatile
+    private var systemGuard: SystemSurfaceGuard = SystemSurfaceGuard()
+
+    private fun hasLauncherActivity(pkg: String): Boolean? =
+        synchronized(launcherActivityCache) {
+            if (launcherActivityCache.containsKey(pkg)) {
+                return@synchronized launcherActivityCache[pkg]
+            }
+            val probed = try {
+                packageManager.getLaunchIntentForPackage(pkg) != null ||
+                    packageManager.queryIntentActivities(
+                        Intent(Intent.ACTION_MAIN)
+                            .addCategory(Intent.CATEGORY_LAUNCHER)
+                            .setPackage(pkg),
+                        PackageManager.ResolveInfoFlags.of(0L),
+                    ).isNotEmpty()
+            } catch (t: Throwable) {
+                Timber.w(t, "launcher activity probe failed for %s", pkg)
+                null
+            }
+            launcherActivityCache[pkg] = probed
+            probed
+        }
+
+    /** True when [pkg] must never be detected or tapped: the launcher, the
+     *  share sheet (`android` / com.android.intentresolver — invisible to the
+     *  whitelist), system dialogs, the notification shade, recents … */
+    private fun isSystemSurface(s: AppSettings, pkg: String): Boolean {
+        if (!s.protectSystemSurfaces) return false
+        return systemGuard.isSystemSurface(pkg)
+    }
+
     /** This app's launcher label ("广告跳过") — it contains the keyword "跳过",
      *  so L1/L2 must never treat it as a skip button. */
     private var selfLabels: Set<String> = emptySet()
@@ -214,6 +256,17 @@ class AdSkipperService : AccessibilityService() {
             settingsRepo.settings.collect { new ->
                 val prev = settings.value
                 settings.value = new
+                if (new.protectSystemSurfaces != prev.protectSystemSurfaces ||
+                    new.systemSurfacePackages != prev.systemSurfacePackages
+                ) {
+                    systemGuard = SystemSurfaceGuard(new.systemSurfacePackages) { pkg ->
+                        hasLauncherActivity(pkg)
+                    }
+                    Timber.i(
+                        "system surface guard: enabled=%s extra=%s",
+                        new.protectSystemSurfaces, new.systemSurfacePackages,
+                    )
+                }
                 if (new.layer3Enabled &&
                     (new.activeModelId != prev.activeModelId ||
                         new.vlmThreads != prev.vlmThreads ||
@@ -312,6 +365,13 @@ class AdSkipperService : AccessibilityService() {
             if (!s.selfTest || !selfTestAdVisible) return
         }
         if (pkg in s.whitelist || pkg in homePackages || pkg in browserPackages) return
+        // Launcher, share sheet, system dialogs: a splash ad never appears
+        // there, and without this the "first event after a gap = splash
+        // window" heuristic below starts a poller on top of them.
+        if (isSystemSurface(s, pkg)) {
+            Timber.d("system surface %s, skip", pkg)
+            return
+        }
 
         val now = android.os.SystemClock.elapsedRealtime()
 
@@ -568,6 +628,13 @@ class AdSkipperService : AccessibilityService() {
                 "active window is %s, not %s, skip tick",
                 root?.packageName ?: "<null root>", pkg,
             )
+            return false
+        }
+        // Belt and braces for the poller path: [pkg] can be a legitimate
+        // target while the window on screen is a system surface — e.g. a
+        // share sheet opened from the app that owns [pkg]. Never tap there.
+        if (isSystemSurface(s, pkg)) {
+            Timber.d("system surface %s — no detection this tick", pkg)
             return false
         }
         // Ad-SDK fingerprints in the tree are evidence too (cheap: splash
