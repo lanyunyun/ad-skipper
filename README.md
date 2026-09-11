@@ -115,6 +115,12 @@ brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
    备选 Qwen2.5-VL 3B（约 2.8GB，672px 输入精度相当）。源：ModelScope，
    失败自动回退 hf-mirror；也支持手动导入 GGUF + mmproj，选中后自动切换。
 4. 「设置」页可配置关键词、白名单、调试悬浮窗（命中时显示层级与坐标）。
+5. 「系统界面保护」（默认开启）：桌面、分享面板、系统弹窗、通知栏/最近任务
+   一律不识别、不点击。它独立于白名单实现 —— 白名单一旦持久化就不会再收到
+   新版本追加的默认项，而分享面板运行在系统进程（`android` /
+   `com.android.intentresolver`），不属于任何 App，正是白名单覆盖不到的地方。
+   除内置列表外，还会自动排除「没有桌面图标的界面」（各厂商自研分享面板、
+   权限弹窗多属此类）；探测不出结果时只会放行，不会误排除。
 
 APK 不内置 VLM（约 52MB，其中 YOLO 检测器约 5MB）；VLM 为可选下载项。
 
