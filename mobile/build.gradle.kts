@@ -11,6 +11,17 @@ android {
 
     defaultConfig {
         applicationId = "com.tangzixiang.adskipper"
+
+        // Ship arm64-v8a only. The project's own native code is already built
+        // for arm64 alone (core/build.gradle.kts), but that abiFilters sits
+        // inside externalNativeBuild and therefore does NOT filter the .so
+        // files that dependencies package — MLKit's OCR ships x86, x86_64,
+        // armeabi-v7a and arm64-v8a, so ~28 MB of libraries for ABIs this app
+        // cannot run on were being included. Filtering here covers packaged
+        // jniLibs too, and costs nothing: the app never ran on those ABIs.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildFeatures.compose = true
@@ -28,7 +39,7 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
-    implementation(libs.compose.ui.tooling.preview)
+    debugImplementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
 
     implementation(libs.androidx.activity.compose)
