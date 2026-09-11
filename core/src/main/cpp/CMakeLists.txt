@@ -28,9 +28,17 @@ set(GGML_NATIVE          OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP          OFF CACHE BOOL "" FORCE)
 # GPU inference via the ggml Vulkan backend (works on Android GPUs; falls
 # back to CPU when no Vulkan device is present).
-set(GGML_VULKAN           ON CACHE BOOL "" FORCE)
+# Overridable with -DGGML_VULKAN=OFF for hosts that have no Vulkan-Headers /
+# glslc / SPIRV-Headers (e.g. a plain Windows dev box): the whole Vulkan setup
+# below is skipped then, and only the optional VLM inference loses GPU offload
+# (ncnn's YOLO detector dlopens the Vulkan driver itself, so ad detection is
+# unaffected).
+if (NOT DEFINED GGML_VULKAN)
+    set(GGML_VULKAN           ON CACHE BOOL "" FORCE)
+endif()
 set(MTMD_VIDEO           OFF CACHE BOOL "" FORCE)
 
+if (GGML_VULKAN)
 # Cross-compiling: CMake's FindVulkan / find_package can't see host or NDK
 # paths on their own — point everything out explicitly.
 # Headers come from Khronos Vulkan-Headers (brew install vulkan-headers), NOT
@@ -110,6 +118,7 @@ foreach(candidate
         break()
     endif()
 endforeach()
+endif() # GGML_VULKAN
 
 # Local patches to the vendored llama.cpp (idempotent: skipped when already
 # applied). 0001: don't request the legacy VK_KHR_16bit_storage extension
