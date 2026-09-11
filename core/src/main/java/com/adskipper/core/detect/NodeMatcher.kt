@@ -62,8 +62,7 @@ object NodeMatcher {
     /** True if any node in the tree (bounded by [cap]) carries an ad-SDK
      *  class or view-id fingerprint — see [AdSdkSignatures]. Splash trees
      *  are tiny, so this stays cheap. */
-    fun hasAdSdkMarker(root: AccessibilityNodeInfo?, cap: Int): Boolean {
-        root ?: return false
+    fun hasAdSdkMarker(root: AccessibilityNodeInfo?, cap: Int): Boolean {        root ?: return false
         var count = 0
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
@@ -80,12 +79,70 @@ object NodeMatcher {
         return false
     }
 
+    /** What a tap at (x, y) would hit in a tree right now.
+     *
+     *  [nodeAtPoint] is the deepest visible node containing the point (null when
+     *  the point belongs to no node at all); [clickable] is that node or its
+     *  nearest enabled clickable ancestor, i.e. the view ACTION_CLICK would act
+     *  on.
+     *
+     *  Both are needed because many real skip buttons are NOT marked clickable:
+     *  a tap gesture at their centre still works while ACTION_CLICK refuses.
+     *  The distinction that matters for safety is "a node is still there" vs
+     *  "the screen moved on and nothing occupies those coordinates any more". */
+    class TapHit(val nodeAtPoint: AccessibilityNodeInfo?, val clickable: AccessibilityNodeInfo?)
+
+    /** One allocation-free tree walk (a single reusable Rect, no per-node
+     *  objects) resolving [TapHit] for (x, y). Bounded by [cap] because it runs
+     *  inside the detection loop. */
+    fun hitTest(
+        root: AccessibilityNodeInfo?,
+        x: Float,
+        y: Float,
+        cap: Int = 400,
+    ): TapHit {
+        root ?: return TapHit(null, null)
+        val px = x.toInt()
+        val py = y.toInt()
+        val bounds = Rect()
+        var best: AccessibilityNodeInfo? = null
+        var bestDepth = -1
+        var count = 0
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.addLast(root to 0)
+        while (queue.isNotEmpty()) {
+            val (node, depth) = queue.removeFirst()
+            if (++count >= cap) break
+            if (node.isVisibleToUser) {
+                node.getBoundsInScreen(bounds)
+                if (!bounds.isEmpty &&
+                    px >= bounds.left && px < bounds.right &&
+                    py >= bounds.top && py < bounds.bottom &&
+                    depth > bestDepth
+                ) {
+                    best = node
+                    bestDepth = depth
+                }
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.addLast(it to depth + 1) }
+            }
+        }
+        var candidate = best
+        var hops = 0
+        while (candidate != null && hops < 6) {
+            if (candidate.isClickable && candidate.isEnabled) return TapHit(best, candidate)
+            candidate = candidate.parent
+            hops++
+        }
+        return TapHit(best, null)
+    }
+
     /** Node count with an early exit at [cap]. Splash/ad screens are a
      *  handful of views (the ad SDK's container), while real app UI is
      *  hundreds — used to decide whether a screen can still be a splash ad
      *  after the core splash window has elapsed. */
-    fun treeSize(root: AccessibilityNodeInfo?, cap: Int): Int {
-        root ?: return 0
+    fun treeSize(root: AccessibilityNodeInfo?, cap: Int): Int {        root ?: return 0
         var count = 0
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
