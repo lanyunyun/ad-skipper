@@ -38,9 +38,17 @@
         </intent>
     </queries>
 
+    <!-- allowNativeHeapPointerTagging=false: the bundled native inference
+         libraries (ggml/llama.cpp) segfault on pointers carrying the top-byte
+         tag on this device — "Fatal signal 11 (SEGV_MAPERR), fault addr
+         0xb400006e86dcbb00" with frames in libggml-*.so. Android's pointer
+         tagging is hardening, and this is the documented opt-out for native code
+         that is not tagging-aware. Without it the accessibility service dies and
+         Android disables it, which the user sees as "the app stopped working". -->
     <application
         android:name=".AdSkipperApp"
         android:allowBackup="true"
+        android:allowNativeHeapPointerTagging="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
