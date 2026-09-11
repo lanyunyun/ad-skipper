@@ -3,6 +3,8 @@ package com.adskipper.ui
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -86,6 +88,17 @@ private fun AppNavHost() {
             navController = nav,
             startDestination = Routes.HOME,
             modifier = Modifier.padding(padding),
+            // Bottom-tab switches must be instant. navigation-compose's default
+            // enter/exit is a fadeIn/fadeOut tween (700ms), which keeps the
+            // outgoing screen composed — and still scrollable — underneath the
+            // incoming one for most of a second. Reported on device: the old tab
+            // could be swiped while the new one was already on screen. These four
+            // destinations are siblings reached from a tab bar, so no transition
+            // is wanted at all; the trade is an abrupt swap for a correct one.
+            enterTransition = { EnterTransition.None },
+            exitTransition = { ExitTransition.None },
+            popEnterTransition = { EnterTransition.None },
+            popExitTransition = { ExitTransition.None },
         ) {
             composable(Routes.HOME) { HomeScreen() }
             composable(Routes.SETTINGS) { SettingsScreen() }
