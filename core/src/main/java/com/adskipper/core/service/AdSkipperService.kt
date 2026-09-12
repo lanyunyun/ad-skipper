@@ -73,6 +73,9 @@ class AdSkipperService : AccessibilityService() {
     /** Last event-driven L1 attempt per package; see [fastL1Attempt]. */
     private val lastFastL1At = ConcurrentHashMap<String, Long>()
 
+    /** Last time the image layers (YOLO/VLM) actually ran for a package. */
+    private val lastL3At = ConcurrentHashMap<String, Long>()
+
     /** Throttles the "why is nothing happening for this package" log line. */
     private val lastSkipLogAt = ConcurrentHashMap<String, Long>()
 
@@ -559,13 +562,19 @@ class AdSkipperService : AccessibilityService() {
                     // so L1+L2 run on every tick — on-device logs showed the real
                     // skip buttons of several apps are invisible to the node tree
                     // and only OCR finds them, and those were waiting a full
-                    // throttle window. Only the image layers (YOLO/VLM) are
-                    // expensive enough to be worth throttling.
-                    val fastTick = ticks % SPLASH_FULL_PIPELINE_EVERY != 0
+                    // throttle window.
+                    //
+                    // The image layers (YOLO, then a multi-second VLM) are a
+                    // different story: they run for the core splash window only.
+                    // That is the author's "steady state = keyword layers" design
+                    // (the event path below enforces it too), and it keeps the
+                    // heaviest native inference away from ordinary in-app screens,
+                    // which is what crashed the service on device.
+                    val inCoreWindow = elapsed <= SPLASH_WINDOW_MS
                     val effective = when {
                         downgraded && !adEvidence.isAdConfirmed(pkg) ->
                             s.copy(layer2Enabled = false, layer3Enabled = false)
-                        fastTick && s.layer3Enabled -> s.copy(layer3Enabled = false)
+                        !inCoreWindow && s.layer3Enabled -> s.copy(layer3Enabled = false)
                         else -> s
                     }
                     // A tap already landed and this pass found nothing: the ad
@@ -574,7 +583,7 @@ class AdSkipperService : AccessibilityService() {
                     // on text in the app's own UI ("跳过" in the real screen,
                     // (368,1535) vs the ad button at (1072,238)) because the OCR
                     // layer has no evidence gate. Stop here instead.
-                    val tapped = runDetection(pkg, effective, inCoreWindow = elapsed <= SPLASH_WINDOW_MS)
+                    val tapped = runDetection(pkg, effective, inCoreWindow = inCoreWindow)
                     if (tapped) {
                         taps++
                     } else if (taps > 0) {
@@ -782,8 +791,23 @@ class AdSkipperService : AccessibilityService() {
                     // a badge/countdown visible right now unlocks L3 in the
                     // same tick.
                     adEvidence.observeOcr(pkg, lines)
-                    val open = selfTesting || adEvidence.isAdConfirmed(pkg)
-                    if (!open) Timber.d("no ad evidence in %s — image L3 gated", pkg)
+                    // Once evidence is confirmed it stays confirmed for the
+                    // whole ad, so without a cooldown every tick (~400ms) ran
+                    // YOLO and, whenever YOLO missed, a multi-second VLM
+                    // inference on the GPU. Reported on device: skipping a few
+                    // ads in a row then killed the accessibility service via a
+                    // native crash. L3 is the last-resort layer; budget it.
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val last = lastL3At[pkg] ?: 0L
+                    val cooled = now - last >= L3_MIN_GAP_MS
+                    val open = (selfTesting || adEvidence.isAdConfirmed(pkg)) && cooled
+                    when {
+                        open -> lastL3At[pkg] = now
+                        !cooled -> Timber.d(
+                            "L3 cooling down in %s (%dms left)", pkg, L3_MIN_GAP_MS - (now - last),
+                        )
+                        else -> Timber.d("no ad evidence in %s - image L3 gated", pkg)
+                    }
                     open
                 },
             )
@@ -1030,6 +1054,10 @@ class AdSkipperService : AccessibilityService() {
         /** Floor between event-driven L1-only attempts, so an event burst from a
          *  busy ad SDK cannot pile detections up. */
         private const val FAST_L1_MIN_GAP_MS = 120L
+        /** Floor between two image-layer (YOLO/VLM) evaluations for one package.
+         *  VLM inference takes seconds on the GPU, and running it on every poll
+         *  tick crashed the native layer on device. */
+        private const val L3_MIN_GAP_MS = 3000L
 
         /** Taps per splash session are capped so a phantom target (matched but
          *  not dismissible) is never tapped indefinitely. */
